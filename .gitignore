@@ -8,3 +8,5 @@ results*/
 tmp.py
 code_eval/
 wandb/
+.venv/
+reproduce/outputs/

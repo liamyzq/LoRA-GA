@@ -35,6 +35,20 @@ pip install -r requirements.txt
 pip install -e peft
 ```
 
+Using `uv`, the same setup becomes:
+
+```bash
+DS_BUILD_OPS=0 uv sync
+```
+
+This installs the repo dependencies and wires the local `peft/` directory as an editable package.
+
+If you want FlashAttention as well and your local CUDA toolchain matches the PyTorch build, install the optional extra:
+
+```bash
+DS_BUILD_OPS=0 uv sync --extra flash-attn
+```
+
 ### 2. Use LoRA-GA in peft
 
 Here is an example of how to use LoRA-GA with peft in your code:
@@ -113,6 +127,24 @@ CUDA_VISIBLE_DEVICES="0,1,2,3" python -m accelerate.commands.launch \
 --config_file examples/accelerate_config.yaml \
 examples/float_llama2-7b_metamath.py
 ```
+
+### Full fine-tuning Llama 3 8B Instruct with DeepSpeed
+
+The legacy `reproduce/` workflow now also supports full fine-tuning `meta-llama/Meta-Llama-3-8B-Instruct` with DeepSpeed ZeRO-3.
+
+```bash
+uv run --directory reproduce ./run_llama3_8b_full_ft_deepspeed.sh
+```
+
+Useful overrides:
+
+```bash
+NUM_GPUS=4 DATASET_NAME=meta_math WANDB_PROJECT=lora_ga_full_ft \
+uv run --directory reproduce ./run_llama3_8b_full_ft_deepspeed.sh \
+++model.learning_rate=2e-5 ++seed=9
+```
+
+The launcher defaults to `FLASH_ATTENTION=false` so it can start even on systems where `flash-attn` is not compiled.
 
 ## Note on Usage
 

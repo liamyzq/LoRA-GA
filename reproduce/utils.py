@@ -136,30 +136,34 @@ def initialize_text_to_text_model(
     use_peft: bool = True,
     tokenizer: str = None,
     flash_attention: bool = False,
+    device_map: tp.Optional[str] = None,
+    low_cpu_mem_usage: bool = True,
 ):
+    dtype = torch.bfloat16 if bf16 else torch.float32
     if model_type == "CausalLM":
+        model_kwargs = {
+            "trust_remote_code": True,
+            "torch_dtype": dtype,
+            "low_cpu_mem_usage": low_cpu_mem_usage,
+        }
+        if device_map is None and use_peft:
+            device_map = "auto"
+        if device_map is not None:
+            model_kwargs["device_map"] = device_map
         if flash_attention:
             log.info("Using flash attention 2")
-            model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                trust_remote_code=True,
-                torch_dtype=torch.bfloat16 if bf16 else torch.float32,
-                device_map="auto" if use_peft else None,
-                attn_implementation="flash_attention_2",
-            )
-        else:
-            model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                trust_remote_code=True,
-                torch_dtype=torch.bfloat16 if bf16 else torch.float32,
-                device_map="auto" if use_peft else None,
-            )
+            model_kwargs["attn_implementation"] = "flash_attention_2"
+        model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
     elif model_type == "ConditionalGeneration":
-        model = AutoModelForSeq2SeqLM.from_pretrained(
-            model_name,
-            torch_dtype=torch.bfloat16 if bf16 else torch.float32,
-            device_map="auto" if use_peft else None,
-        )
+        model_kwargs = {
+            "torch_dtype": dtype,
+            "low_cpu_mem_usage": low_cpu_mem_usage,
+        }
+        if device_map is None and use_peft:
+            device_map = "auto"
+        if device_map is not None:
+            model_kwargs["device_map"] = device_map
+        model = AutoModelForSeq2SeqLM.from_pretrained(model_name, **model_kwargs)
     if tokenizer:
         tokenizer = AutoTokenizer.from_pretrained(tokenizer)
     else:
@@ -288,6 +292,9 @@ def train_text_to_text_model(
         warmup_ratio = 0.03,
         lr_scheduler_type = "cosine",
         seed = kwargs.get("seed", 42),
+        report_to=kwargs.get("report_to", []),
+        deepspeed=kwargs.get("deepspeed"),
+        ddp_find_unused_parameters=kwargs.get("ddp_find_unused_parameters"),
         **additional_kwargs,
     )
 
@@ -305,6 +312,12 @@ def train_text_to_text_model(
     )
 
     trainer.train()
+
+    save_dir = kwargs.get("save_dir")
+    if save_dir is not None:
+        trainer.save_model(save_dir)
+        if trainer.is_world_process_zero():
+            tokenizer.save_pretrained(save_dir)
 
     return model
 

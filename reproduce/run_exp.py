@@ -1,5 +1,6 @@
 from peft import get_peft_model, LoraConfig, AdaLoraConfig, TaskType
 import os
+import sys
 import hydra
 from omegaconf import DictConfig, OmegaConf
 from utils import (
@@ -37,6 +38,34 @@ def seed_everything(seed: int):
     torch.cuda.manual_seed(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = True
+
+
+def get_rank() -> int:
+    return int(os.environ.get("RANK", "0"))
+
+
+def get_world_size() -> int:
+    return int(os.environ.get("WORLD_SIZE", "1"))
+
+
+def is_main_process() -> bool:
+    return get_rank() == 0
+
+
+def strip_distributed_launcher_args(argv: List[str]) -> List[str]:
+    cleaned = []
+    skip_next = False
+    for arg in argv:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg == "--local_rank":
+            skip_next = True
+            continue
+        if arg.startswith("--local_rank="):
+            continue
+        cleaned.append(arg)
+    return cleaned
 
 
 def find_all_linear_modules(model) -> List[str]:
@@ -312,6 +341,12 @@ def run_exp(cfg: DictConfig):
     lora_relative_r = cfg.peft.lora_relative_r
     lora_target_modules = cfg.peft.lora_target_modules
     train_embeddings = cfg.peft.train_embeddings
+    deepspeed_enabled = bool(cfg.get("deepspeed", {}).get("enabled", False))
+    deepspeed_config = cfg.get("deepspeed", {}).get("config")
+    flash_attention = cfg.get("flash_attention", True)
+    gradient_checkpointing = cfg.get("gradient_checkpointing", False)
+    main_process = is_main_process()
+    world_size = get_world_size()
     if cfg.dry_run:
         return
     if use_peft:
@@ -338,16 +373,31 @@ def run_exp(cfg: DictConfig):
     else:
         name = "_".join([f"{k}={v}" for k, v in config.items()])
     cfg.wandb.project += "_" + cfg.dataset_name
-    wandb.init(
-        entity="atcs_project",
-        project=cfg.wandb.project,
-        name=name,
-        config=config,
-    )
+    wandb_mode = cfg.wandb.get("mode", "online")
+    wandb_entity = os.environ.get("WANDB_ENTITY_OVERRIDE", "zeqiye-northwestern-university")
+    if not main_process:
+        os.environ.setdefault("WANDB_MODE", "disabled")
+    wandb_enabled = main_process and wandb_mode != "disabled"
+    if wandb_enabled:
+        wandb.init(
+            entity=wandb_entity,
+            project=cfg.wandb.project,
+            name=name,
+            config=config,
+            mode=wandb_mode,
+        )
     train_set, val_set, _ = dataset_func()
+    distributed_full_ft = not use_peft and (deepspeed_enabled or world_size > 1)
     model, tokenizer = initialize_text_to_text_model(
-        model_name, model_type, cfg.model.bf16, cfg.peft.use_peft, flash_attention=True
+        model_name,
+        model_type,
+        cfg.model.bf16,
+        cfg.peft.use_peft,
+        flash_attention=flash_attention,
+        device_map=None if distributed_full_ft else ("auto" if use_peft else None),
     )
+    if gradient_checkpointing and hasattr(model.config, "use_cache"):
+        model.config.use_cache = False
     additional_kwargs = {}
     if use_peft and cfg.init.mode == "gradient":
         if isinstance(train_set, list):
@@ -432,12 +482,13 @@ def run_exp(cfg: DictConfig):
         save_dir = os.path.join(
             "results", f"{cfg.wandb.project}/{name}/{cfg.seed}", "orig_checkpoint"
         )
-        model.save_pretrained(save_dir)
-        adapter_config = json.load(open(os.path.join(save_dir, "adapter_config.json")))
-        adapter_config["lora_alpha"] = -adapter_config["lora_alpha"]
-        json.dump(
-            adapter_config, open(os.path.join(save_dir, "adapter_config.json"), "w")
-        )
+        if main_process:
+            model.save_pretrained(save_dir)
+            adapter_config = json.load(open(os.path.join(save_dir, "adapter_config.json")))
+            adapter_config["lora_alpha"] = -adapter_config["lora_alpha"]
+            json.dump(
+                adapter_config, open(os.path.join(save_dir, "adapter_config.json"), "w")
+            )
     else:
         # full finetune
         all_param = sum(p.numel() for p in model.parameters())
@@ -451,7 +502,11 @@ def run_exp(cfg: DictConfig):
         }
     log.info(rate)
     # log rate into wandb summary
-    wandb.summary.update(rate)
+    if wandb_enabled:
+        wandb.summary.update(rate)
+    save_dir = os.path.join(
+        "results", f"{cfg.wandb.project}/{name}/{cfg.seed}", "merged_checkpoint"
+    )
     training_loop = train_text_to_text_model
     model = training_loop(
         f"{cfg.wandb.project}/{name}",
@@ -471,24 +526,22 @@ def run_exp(cfg: DictConfig):
         use_loraplus=cfg.peft.use_loraplus,
         loraplus_lr_ratio=cfg.peft.loraplus_lr_ratio,
         learning_rate=cfg.model.learning_rate,
-        # deepspeed=(
-        #     "z3_offload_all_bf16.json" if cfg.peft == False else None
-        # ),
-        gradient_checkpointing=cfg.get("gradient_checkpointing", False),
+        deepspeed=deepspeed_config if deepspeed_enabled else None,
+        ddp_find_unused_parameters=False if world_size > 1 else None,
+        gradient_checkpointing=gradient_checkpointing,
+        report_to=["wandb"] if wandb_enabled else [],
+        save_dir=save_dir if not use_peft else None,
         seed=cfg.seed,
     )
-    save_dir = os.path.join(
-        "results", f"{cfg.wandb.project}/{name}/{cfg.seed}", "merged_checkpoint"
-    )
-    if not use_peft:
-        model.save_pretrained(save_dir)
-        tokenizer.save_pretrained(save_dir)
-    else:
+    if use_peft:
         # merge_llama(os.path.join("results", f"{cfg.wandb.project}/{name}/{cfg.seed}"))
         pass
-    log.info(f"Saving model to {save_dir}")
-    wandb.finish()
+    if main_process:
+        log.info(f"Saving model to {save_dir}")
+    if wandb_enabled:
+        wandb.finish()
 
 
 if __name__ == "__main__":
+    sys.argv = [sys.argv[0], *strip_distributed_launcher_args(sys.argv[1:])]
     run_exp()

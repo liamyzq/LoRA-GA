@@ -2,9 +2,15 @@ defaults:
   - _self_
   - model: t5base
 dry_run: False
+gradient_checkpointing: False
+flash_attention: True
 wandb:
   project: "glue_new"
   name: null
+  mode: "online"
+deepspeed:
+  enabled: False
+  config: null
 hydra:
   sweeper:
     params:
