@@ -11,6 +11,13 @@ wandb:
 deepspeed:
   enabled: False
   config: null
+evaluation:
+  enabled: False
+  task: null
+  flash_attention: False
+monitor:
+  enabled: False
+  interval_minutes: 5
 hydra:
   sweeper:
     params:

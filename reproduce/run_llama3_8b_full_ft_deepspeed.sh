@@ -8,19 +8,33 @@ NUM_GPUS=${NUM_GPUS:-4}
 MASTER_PORT=${MASTER_PORT:-29500}
 DATASET_NAME=${DATASET_NAME:-meta_math}
 MODEL_CONFIG=${MODEL_CONFIG:-llama3_8b_instruct}
-WANDB_PROJECT=${WANDB_PROJECT:-lora_ga_full_ft}
+WANDB_PROJECT=${WANDB_PROJECT:-finetune_llama3_full}
 FLASH_ATTENTION=${FLASH_ATTENTION:-false}
+SEED=${SEED:-9}
+EVAL_TASK=${EVAL_TASK:-gsm8k}
+MONITOR_INTERVAL_MINUTES=${MONITOR_INTERVAL_MINUTES:-5}
+DEEPSPEED_CONFIG=${DEEPSPEED_CONFIG:-$SCRIPT_DIR/deepspeed/zero2_bf16.json}
 
 cd "$SCRIPT_DIR"
 export TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM:-false}
 
-deepspeed --num_gpus="$NUM_GPUS" --master_port="$MASTER_PORT" run_exp.py \
-  model="$MODEL_CONFIG" \
-  +peft=full_ft \
-  +dataset_name="$DATASET_NAME" \
-  ++flash_attention="$FLASH_ATTENTION" \
-  ++gradient_checkpointing=true \
-  ++wandb.project="$WANDB_PROJECT" \
-  ++deepspeed.enabled=true \
-  ++deepspeed.config="$SCRIPT_DIR/deepspeed/zero3_bf16.json" \
-  "$@"
+cmd=(
+  deepspeed --num_gpus="$NUM_GPUS" --master_port="$MASTER_PORT" run_exp.py
+  model="$MODEL_CONFIG"
+  +peft=full_ft
+  +dataset_name="$DATASET_NAME"
+  ++seed="$SEED"
+  ++flash_attention="$FLASH_ATTENTION"
+  ++gradient_checkpointing=true
+  ++wandb.project="$WANDB_PROJECT"
+  ++evaluation.enabled=true
+  ++evaluation.task="$EVAL_TASK"
+  ++monitor.enabled=true
+  ++monitor.interval_minutes="$MONITOR_INTERVAL_MINUTES"
+  ++deepspeed.enabled=true
+  ++deepspeed.config="$DEEPSPEED_CONFIG"
+)
+
+cmd+=("$@")
+
+"${cmd[@]}"

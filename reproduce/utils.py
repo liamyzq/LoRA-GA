@@ -330,6 +330,7 @@ def model_inference(
     max_source_length: str = 768,
     max_target_length: str = 256,
 ):
+    model_device = next(model.parameters()).device
     if model_type == "CausalLM":
         inputs = tokenizer(
             input_text + " ",
@@ -338,7 +339,7 @@ def model_inference(
             truncation=True,
             return_token_type_ids=False,
         )
-        inputs = {k: v.cuda() for k, v in inputs.items()}
+        inputs = {k: v.to(model_device) for k, v in inputs.items()}
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
@@ -354,7 +355,7 @@ def model_inference(
             skip_special_tokens=True,
         )
     elif model_type == "ConditionalGeneration":
-        inputs = tokenizer(input_text, return_tensors="pt").to("cuda")
+        inputs = tokenizer(input_text, return_tensors="pt").to(model_device)
         with torch.no_grad():
             outputs = model.generate(**inputs, max_new_tokens=max_target_length)
         pred_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
