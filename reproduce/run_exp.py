@@ -26,6 +26,8 @@ from tqdm import tqdm, trange
 from typing import Tuple, List, Dict
 from peft.tuners.lora.layer import Linear as LoraLinear
 from eval_gsm8k import evaluate_gsm8k_model
+from eval_humaneval import evaluate_humaneval_model
+from eval_mmlu import evaluate_mmlu_model
 
 try:
     import pynvml
@@ -197,6 +199,9 @@ def write_run_report_text(report_path, report):
         f"seed: {report.get('seed')}",
         f"dataset_name: {report.get('dataset_name')}",
         f"model_name: {report.get('model_name')}",
+        f"evaluation_task: {report.get('evaluation_task')}",
+        f"evaluation_metric_name: {report.get('evaluation_metric_name')}",
+        f"evaluation_metric_value: {report.get('evaluation_metric_value')}",
         f"runtime_seconds: {report.get('runtime_seconds')}",
         f"gpu_total_memory_used_mib_peak: {report.get('gpu_total_memory_used_mib_peak')}",
         f"gpu_total_memory_used_mib_avg: {report.get('gpu_total_memory_used_mib_avg')}",
@@ -204,6 +209,11 @@ def write_run_report_text(report_path, report):
         f"gpu_total_utilization_pct_avg: {report.get('gpu_total_utilization_pct_avg')}",
         f"gsm8k_accuracy: {report.get('gsm8k_accuracy')}",
         f"gsm8k_num_examples: {report.get('gsm8k_num_examples')}",
+        f"humaneval_pass_at_1: {report.get('humaneval_pass_at_1')}",
+        f"humaneval_num_tasks: {report.get('humaneval_num_tasks')}",
+        f"humaneval_num_samples_per_task: {report.get('humaneval_num_samples_per_task')}",
+        f"mmlu_accuracy: {report.get('mmlu_accuracy')}",
+        f"mmlu_num_subjects: {report.get('mmlu_num_subjects')}",
         f"results_dir: {report.get('results_dir')}",
         f"model_checkpoint_dir: {report.get('model_checkpoint_dir')}",
     ]
@@ -702,27 +712,91 @@ def run_exp(cfg: DictConfig):
             torch.cuda.empty_cache()
 
         distributed_barrier()
-        if (
-            main_process
-            and cfg.get("evaluation", {}).get("enabled", False)
-            and cfg.evaluation.get("task") == "gsm8k"
-        ):
-            eval_results = evaluate_gsm8k_model(
-                save_dir,
-                tokenizer_name=save_dir,
-                flash_attention=cfg.evaluation.get("flash_attention", False),
-                bf16=cfg.model.bf16,
-                results_path=os.path.join(run_dir, "gsm8k_eval.json"),
-            )
-            run_report["gsm8k_accuracy"] = eval_results["accuracy"]
-            run_report["gsm8k_num_examples"] = eval_results["num_examples"]
-            if wandb_enabled:
-                wandb.summary.update(
-                    {
-                        "gsm8k_accuracy": eval_results["accuracy"],
-                        "gsm8k_num_examples": eval_results["num_examples"],
-                    }
+        if main_process and cfg.get("evaluation", {}).get("enabled", False):
+            eval_task = cfg.evaluation.get("task")
+            if eval_task == "gsm8k":
+                eval_results = evaluate_gsm8k_model(
+                    save_dir,
+                    tokenizer_name=save_dir,
+                    flash_attention=cfg.evaluation.get("flash_attention", False),
+                    bf16=cfg.model.bf16,
+                    results_path=os.path.join(run_dir, "gsm8k_eval.json"),
                 )
+                run_report["evaluation_task"] = "gsm8k"
+                run_report["evaluation_metric_name"] = "accuracy"
+                run_report["evaluation_metric_value"] = eval_results["accuracy"]
+                run_report["gsm8k_accuracy"] = eval_results["accuracy"]
+                run_report["gsm8k_num_examples"] = eval_results["num_examples"]
+                if wandb_enabled:
+                    wandb.summary.update(
+                        {
+                            "evaluation_task": "gsm8k",
+                            "evaluation_metric_name": "accuracy",
+                            "evaluation_metric_value": eval_results["accuracy"],
+                            "gsm8k_accuracy": eval_results["accuracy"],
+                            "gsm8k_num_examples": eval_results["num_examples"],
+                        }
+                    )
+            elif eval_task == "humaneval":
+                eval_results = evaluate_humaneval_model(
+                    save_dir,
+                    tokenizer_name=save_dir,
+                    flash_attention=cfg.evaluation.get("flash_attention", False),
+                    bf16=cfg.model.bf16,
+                    num_samples_per_task=cfg.evaluation.get("num_samples", 1),
+                    output_dir=os.path.join(run_dir, "humaneval"),
+                    cleanup=cfg.evaluation.get("cleanup", True),
+                    n_workers=cfg.evaluation.get("n_workers", 4),
+                    timeout=cfg.evaluation.get("timeout", 3.0),
+                )
+                run_report["evaluation_task"] = "humaneval"
+                run_report["evaluation_metric_name"] = eval_results["metric_name"]
+                run_report["evaluation_metric_value"] = eval_results["metric_value"]
+                run_report["humaneval_pass_at_1"] = eval_results["metric_value"]
+                run_report["humaneval_num_tasks"] = eval_results["num_tasks"]
+                run_report["humaneval_num_samples_per_task"] = eval_results["num_samples_per_task"]
+                run_report["humaneval_sample_file"] = eval_results["sample_file"]
+                run_report["humaneval_result_file"] = eval_results["result_file"]
+                if wandb_enabled:
+                    wandb.summary.update(
+                        {
+                            "evaluation_task": "humaneval",
+                            "evaluation_metric_name": eval_results["metric_name"],
+                            "evaluation_metric_value": eval_results["metric_value"],
+                            "humaneval_pass_at_1": eval_results["metric_value"],
+                            "humaneval_num_tasks": eval_results["num_tasks"],
+                            "humaneval_num_samples_per_task": eval_results["num_samples_per_task"],
+                        }
+                    )
+            elif eval_task == "mmlu":
+                eval_results = evaluate_mmlu_model(
+                    save_dir,
+                    tokenizer_name=save_dir,
+                    flash_attention=cfg.evaluation.get("flash_attention", False),
+                    bf16=cfg.model.bf16,
+                    ntrain=cfg.evaluation.get("ntrain", 5),
+                    data_dir=cfg.evaluation.get("data_dir"),
+                    results_path=os.path.join(run_dir, "mmlu_eval.json"),
+                )
+                run_report["evaluation_task"] = "mmlu"
+                run_report["evaluation_metric_name"] = eval_results["metric_name"]
+                run_report["evaluation_metric_value"] = eval_results["metric_value"]
+                run_report["mmlu_accuracy"] = eval_results["metric_value"]
+                run_report["mmlu_num_subjects"] = eval_results["num_subjects"]
+                run_report["mmlu_category_metrics"] = eval_results["category_metrics"]
+                run_report["mmlu_subcategory_metrics"] = eval_results["subcategory_metrics"]
+                if wandb_enabled:
+                    wandb.summary.update(
+                        {
+                            "evaluation_task": "mmlu",
+                            "evaluation_metric_name": eval_results["metric_name"],
+                            "evaluation_metric_value": eval_results["metric_value"],
+                            "mmlu_accuracy": eval_results["metric_value"],
+                            "mmlu_num_subjects": eval_results["num_subjects"],
+                        }
+                    )
+            else:
+                raise ValueError(f"Unsupported evaluation task: {eval_task}")
         run_report["status"] = "success"
     except Exception as exc:
         run_report["status"] = "failed"

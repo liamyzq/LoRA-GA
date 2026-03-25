@@ -128,23 +128,25 @@ CUDA_VISIBLE_DEVICES="0,1,2,3" python -m accelerate.commands.launch \
 examples/float_llama2-7b_metamath.py
 ```
 
-### Full fine-tuning Llama 3 8B Instruct with DeepSpeed
+### Full fine-tuning Llama 3.1 8B with DeepSpeed
 
-The legacy `reproduce/` workflow now also supports full fine-tuning `meta-llama/Meta-Llama-3-8B-Instruct` with DeepSpeed ZeRO-3.
+The legacy `reproduce/` workflow now also supports full fine-tuning `meta-llama/Llama-3.1-8B` with DeepSpeed, plus unified post-training evaluation on `gsm8k`, `humaneval`, or `mmlu`.
 
 ```bash
-uv run --directory reproduce ./run_llama3_8b_full_ft_deepspeed.sh
+uv run --directory reproduce ./run_llama3_1_8b_full_ft_deepspeed.sh
 ```
 
 Useful overrides:
 
 ```bash
 NUM_GPUS=4 DATASET_NAME=meta_math WANDB_PROJECT=lora_ga_full_ft \
-uv run --directory reproduce ./run_llama3_8b_full_ft_deepspeed.sh \
+uv run --directory reproduce ./run_llama3_1_8b_full_ft_deepspeed.sh \
 ++model.learning_rate=2e-5 ++seed=9
 ```
 
 The launcher defaults to `FLASH_ATTENTION=false` so it can start even on systems where `flash-attn` is not compiled.
+
+`uv sync` also installs the vendored `human-eval/` package from this repo, so HumanEval evaluation works without a separate external checkout. For MMLU, pass `EVAL_TASK=mmlu` and point `MMLU_DATA_DIR` at a dataset directory containing `dev/` and `test/` CSV files in the standard MMLU format.
 
 ## Note on Usage
 

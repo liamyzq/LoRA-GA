@@ -15,6 +15,12 @@ evaluation:
   enabled: False
   task: null
   flash_attention: False
+  num_samples: 1
+  cleanup: True
+  n_workers: 4
+  timeout: 3.0
+  data_dir: null
+  ntrain: 5
 monitor:
   enabled: False
   interval_minutes: 5

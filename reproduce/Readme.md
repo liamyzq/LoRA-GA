@@ -17,13 +17,13 @@ For single run, you can use command like this
 python run_exp.py +peft=all ++peft.lora_relative_r=0.1 +dataset_name=sst2 +init=gaussian 
 ```
 
-For full fine-tuning Llama 3 8B Instruct with DeepSpeed, use:
+For full fine-tuning Llama 3.1 8B with DeepSpeed, use:
 
 ```bash
-./run_llama3_8b_full_ft_deepspeed.sh
+./run_llama3_1_8b_full_ft_deepspeed.sh
 ```
 
-This launcher selects `model=llama3_8b_instruct`, `+peft=full_ft`, enables gradient checkpointing, and points the trainer at `deepspeed/zero3_bf16.json`.
+This launcher selects `model=llama3_1_8b`, `+peft=full_ft`, enables gradient checkpointing, points the trainer at `deepspeed/zero2_bf16.json`, and supports unified post-training evaluation with `EVAL_TASK=gsm8k`, `EVAL_TASK=humaneval`, or `EVAL_TASK=mmlu`.
 
 For multi run, you can use command like this
 

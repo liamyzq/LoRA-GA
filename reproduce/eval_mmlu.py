@@ -1,16 +1,19 @@
 # adapt from https://github.com/declare-lab/instruct-eval/blob/main/mmlu.py
+import json
 import os
-from argparse import Namespace
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import torch
 from fire import Fire
 from tqdm import tqdm
-import torch
 
-from utils import initialize_text_to_text_model
 from data import template_wo_input
+from utils import initialize_text_to_text_model
 
+
+MMLU_DATA_DIR = Path(__file__).resolve().parent / "data_cache" / "mmlu_data"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
@@ -103,27 +106,24 @@ def get_categories():
 
 
 def format_subject(subject):
-    line = subject.split("_")
-    s = ""
-    for entry in line:
-        s += " " + entry
-    return s
+    return " " + " ".join(subject.split("_"))
 
 
 def format_example(df, idx, include_answer=True):
     prompt = df.iloc[idx, 0]
     k = df.shape[1] - 2
     for j in range(k):
-        prompt += "\n{}. {}".format(get_choices()[j], df.iloc[idx, j + 1])
+        prompt += f"\n{get_choices()[j]}. {df.iloc[idx, j + 1]}"
     prompt += "\nAnswer:"
     if include_answer:
-        prompt += " {}\n\n".format(df.iloc[idx, k + 1])
+        prompt += f" {df.iloc[idx, k + 1]}\n\n"
     return prompt
 
 
 def gen_prompt(train_df, subject, k=-1):
-    prompt = "The following are multiple choice questions (with answers) about {}.\n\n".format(
-        format_subject(subject)
+    prompt = (
+        "The following are multiple choice questions (with answers) about "
+        f"{format_subject(subject)}.\n\n"
     )
     if k == -1:
         k = train_df.shape[0]
@@ -131,107 +131,130 @@ def gen_prompt(train_df, subject, k=-1):
         prompt += format_example(train_df, i)
     return prompt
 
+
 @torch.no_grad()
-def run(model, tokenizer, prompt: str, use_template=False, **kwargs) -> str:
-    if use_template:
-        text = template_wo_input.format_map(dict(instruction=prompt))
-    else:
-        text = prompt
+def run_mmlu_choice(model, tokenizer, prompt: str, use_template=False):
+    text = template_wo_input.format_map(dict(instruction=prompt)) if use_template else prompt
     inputs = tokenizer(text, return_tensors="pt").to(model.device)
-    choices_token = [tokenizer(c).input_ids[-1] for c in get_choices()]
+    choice_tokens = [tokenizer(choice).input_ids[-1] for choice in get_choices()]
     outputs = model(**inputs)
     logits = outputs.logits.squeeze(0)[-1].flatten()
-    probs = torch.softmax(logits[choices_token], dim=0)
+    probs = torch.softmax(logits[choice_tokens], dim=0)
     pred = get_choices()[torch.argmax(probs).item()]
     return pred, probs.cpu().numpy()
 
-def evaluate(ntrain, subject, model, tokenizer, dev_df, test_df):
-    cors = []
-    all_probs = []
 
-    for i in range(test_df.shape[0]):
-        # get prompt and make sure it fits
-        k = ntrain
-        prompt_end = format_example(test_df, i, include_answer=False)
-        train_prompt = gen_prompt(dev_df, subject, k)
-        prompt = train_prompt + prompt_end
-
-        label = test_df.iloc[i, test_df.shape[1] - 1]
-        pred, probs = run(model, tokenizer, prompt)
-        cor = pred.strip().startswith(label)
-        cors.append(cor)
-        all_probs.append(probs)
-
-    acc = np.mean(cors)
-    cors = np.array(cors)
-
-    all_probs = np.array(all_probs)
-    print("Average accuracy {:.3f} - {}".format(acc, subject))
-
-    return cors, acc, all_probs
-
-
-def main(model_path, ntrain: int = 5, data_dir = 'data'):
-    model, tokenizer = initialize_text_to_text_model(model_path, "CausalLM", True, flash_attention=True)
+def _load_mmlu_model(model_name, tokenizer_name=None, flash_attention=False, bf16=True):
+    model, tokenizer = initialize_text_to_text_model(
+        model_name,
+        "CausalLM",
+        bf16,
+        use_peft=False,
+        tokenizer=tokenizer_name or model_name,
+        flash_attention=flash_attention,
+        device_map=None,
+    )
+    if torch.cuda.is_available():
+        model = model.to("cuda:0")
     model.eval()
+    return model, tokenizer
+
+
+def evaluate_mmlu_model(
+    model_name,
+    tokenizer_name=None,
+    flash_attention=False,
+    bf16=True,
+    ntrain=5,
+    data_dir=None,
+    results_path=None,
+):
+    data_root = Path(data_dir) if data_dir is not None else MMLU_DATA_DIR
+    test_dir = data_root / "test"
+    dev_dir = data_root / "dev"
+    if not test_dir.exists() or not dev_dir.exists():
+        raise FileNotFoundError(
+            f"MMLU data not found under {data_root}. Expected dev/ and test/ directories."
+        )
+
+    model, tokenizer = _load_mmlu_model(
+        model_name,
+        tokenizer_name=tokenizer_name,
+        flash_attention=flash_attention,
+        bf16=bf16,
+    )
     subjects = sorted(
-        [
-            f.split("_test.csv")[0]
-            for f in os.listdir(os.path.join(data_dir, "test"))
-            if "_test.csv" in f
-        ]
+        f.split("_test.csv")[0]
+        for f in os.listdir(test_dir)
+        if f.endswith("_test.csv")
     )
 
     all_cors = []
+    cat_cors = {cat: [] for cat in get_categories()}
     subcat_cors = {
         subcat: []
-        for subcat_lists in get_subcategories().values()
-        for subcat in subcat_lists
+        for subcat_list in get_subcategories().values()
+        for subcat in subcat_list
     }
-    cat_cors = {cat: [] for cat in get_categories()}
 
     for subject in tqdm(subjects):
-        dev_df = pd.read_csv(
-            os.path.join(data_dir, "dev", subject + "_dev.csv"), header=None
-        )[: ntrain]
-        test_df = pd.read_csv(
-            os.path.join(data_dir, "test", subject + "_test.csv"), header=None
-        )
-
-        cors, acc, probs = evaluate(ntrain, subject, model, tokenizer, dev_df, test_df)
-        subcats = get_subcategories()[subject]
-        for subcat in subcats:
-            subcat_cors[subcat].append(cors)
-            for key in get_categories().keys():
-                if subcat in get_categories()[key]:
-                    cat_cors[key].append(cors)
+        dev_df = pd.read_csv(dev_dir / f"{subject}_dev.csv", header=None)
+        if ntrain != -1:
+            dev_df = dev_df[:ntrain]
+        test_df = pd.read_csv(test_dir / f"{subject}_test.csv", header=None)
+        cors = []
+        for i in range(test_df.shape[0]):
+            prompt_end = format_example(test_df, i, include_answer=False)
+            train_prompt = gen_prompt(dev_df, subject, ntrain)
+            pred, _ = run_mmlu_choice(model, tokenizer, train_prompt + prompt_end)
+            label = test_df.iloc[i, test_df.shape[1] - 1]
+            cors.append(pred.strip().startswith(label))
+        cors = np.array(cors)
         all_cors.append(cors)
+        for subcat in get_subcategories()[subject]:
+            subcat_cors[subcat].append(cors)
+            for cat, cat_subcats in get_categories().items():
+                if subcat in cat_subcats:
+                    cat_cors[cat].append(cors)
 
-    sub_cat_result = {}
-    for subcat in subcat_cors:
-        subcat_acc = np.mean(np.concatenate(subcat_cors[subcat]))
-        print("Average accuracy {:.3f} - {}".format(subcat_acc, subcat))
-        sub_cat_result[subcat] = subcat_acc.item()
+    weighted_acc = float(np.mean(np.concatenate(all_cors)))
+    cat_result = {
+        cat: float(np.mean(np.concatenate(values)))
+        for cat, values in cat_cors.items()
+        if values
+    }
+    subcat_result = {
+        subcat: float(np.mean(np.concatenate(values)))
+        for subcat, values in subcat_cors.items()
+        if values
+    }
+    payload = {
+        "metric_name": "accuracy",
+        "metric_value": weighted_acc,
+        "category_metrics": cat_result,
+        "subcategory_metrics": subcat_result,
+        "num_subjects": len(subjects),
+        "data_dir": str(data_root),
+    }
+    if results_path is not None:
+        results_file = Path(results_path)
+        results_file.parent.mkdir(parents=True, exist_ok=True)
+        with results_file.open("w") as f:
+            json.dump(payload, f, indent=2)
+    return payload
 
-    cat_result = {}
-    for cat in cat_cors:
-        cat_acc = np.mean(np.concatenate(cat_cors[cat]))
-        print("Average accuracy {:.3f} - {}".format(cat_acc, cat))
-        cat_result[cat] = cat_acc.item()
 
-    weighted_acc = np.mean(np.concatenate(all_cors))
-    print("Average accuracy: {:.3f}".format(weighted_acc))
-    import json
-    with open(f"{model_path.replace('/', '_')}_results.json", "w") as f:
-        json.dump(
-            {
-                "sub_cat_result": sub_cat_result,
-                "cat_result": cat_result,
-                "weighted_acc": weighted_acc.item(),
-            },
-            f,
-        )
-    return weighted_acc
+def main(model_name, ntrain=5, data_dir=str(MMLU_DATA_DIR)):
+    results = evaluate_mmlu_model(
+        model_name,
+        tokenizer_name=model_name,
+        flash_attention=False,
+        bf16=True,
+        ntrain=ntrain,
+        data_dir=data_dir,
+        results_path=f"{model_name.replace('/', '_')}_mmlu_results.json",
+    )
+    print(results)
 
 
 if __name__ == "__main__":
